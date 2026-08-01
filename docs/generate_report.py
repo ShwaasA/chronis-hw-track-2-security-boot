@@ -10,16 +10,16 @@ import datetime
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from power_thermal_estimate import estimate_runtime_hours, estimate_draw_ma, LEVEL_DUTY_CYCLE, BATTERY_CAPACITY_MAH
 
 
 def run_tests():
-    result = subprocess.run(
-        ["python3", "-m", "pytest", "tests/", "-v", "--tb=no"],
-        cwd=os.path.dirname(__file__),
-        capture_output=True, text=True,
-    )
+      result = subprocess.run(
+    ["python3", "-m", "pytest", "tests/", "-v", "--tb=no"],
+    cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    capture_output=True, text=True,
+)
     return result.stdout, result.returncode
 
 
@@ -43,12 +43,16 @@ Generated: {today}
 Test suite status: **{status}**
 
 ## 1. Encryption Daemon (Day 1)
-Full key hierarchy implemented: DIK (generated once, never leaves secure
-storage), DSK (derived daily from DIK + date, never persisted), UPK
-(wraps outer encryption layer), Server Transport Key (fresh per upload
-session). `write_to_storage()` structurally rejects anything that isn't
-an `EncryptedRecord` — Rule 1 is enforced at the type level, not by
-convention.
+Full key hierarchy implemented: DIK (generated once, never leaves the
+chip layer), DSK (derived daily from DIK + date via the chip's on-chip
+KDF, never persisted), UPK (wraps a real ECIES outer layer — a fresh
+ephemeral keypair is ECDH'd against UPK per record, so only the UPK
+private-key holder can recover the wrap key), Server Transport Key
+(fresh per upload session). Every record is signed with the DIK private
+key and verified before decryption is attempted — a tampered or
+unsigned record is rejected outright. `write_to_storage()` structurally
+rejects anything that isn't an `EncryptedRecord` — Rule 1 is enforced at
+the type level, not by convention.
 
 ## 2. Boot Sequence + Failure Handling (Day 2)
 Boot order implemented exactly as specified. One automated test per
