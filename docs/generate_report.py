@@ -15,11 +15,11 @@ from power_thermal_estimate import estimate_runtime_hours, estimate_draw_ma, LEV
 
 
 def run_tests():
-      result = subprocess.run(
-    ["python3", "-m", "pytest", "tests/", "-v", "--tb=no"],
-    cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    capture_output=True, text=True,
-)
+    result = subprocess.run(
+        ["python3", "-m", "pytest", "tests/", "-v", "--tb=no"],
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        capture_output=True, text=True,
+    )
     return result.stdout, result.returncode
 
 
