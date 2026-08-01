@@ -1,0 +1,11 @@
+Step 1: Define your threat model
+
+Before writing any code, answer:
+
+If someone steals the wearable, what should they not be able to read?
+If someone connects to the debug port (UART, SWD, JTAG), what should happen?
+If someone copies the flash memory chip, should the data remain unreadable?
+Should the manufacturer be able to decrypt the data, or only the user?
+What happens if the battery dies during a write?
+
+Your encryption design depends on these answers.
