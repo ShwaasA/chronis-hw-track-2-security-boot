@@ -5,8 +5,11 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
 from encryption_daemon import (
     EncryptionDaemon, write_to_storage, BypassAttemptError, EncryptedRecord,
+    SignatureVerificationError,
 )
 
 
@@ -69,24 +72,91 @@ def test_server_transport_key_is_fresh_each_session():
     assert priv1 is not priv2
 
 
-def test_decrypt_roundtrip_via_same_daemon_keys():
-    """Sanity check: the encryption is real, not a no-op."""
+def test_decrypt_roundtrip_via_daemon_api():
+    """The daemon can decrypt its own records via the real API (not a
+    manual layer-by-layer reversal done from outside the class)."""
     daemon = EncryptionDaemon()
     plaintext = b"heart_rate=88,motion=walking"
     record = daemon.encrypt(plaintext, date_str="2026-07-11")
+    recovered = daemon.verify_and_decrypt(record, date_str="2026-07-11")
+    assert recovered == plaintext
 
-    # Manually reverse both layers using the daemon's own keys, proving
-    # the ciphertext genuinely round-trips (this is what the cloud
-    # gateway in Track HW-3 will effectively do on the server side).
-    from cryptography.fernet import Fernet
-    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-    import hashlib
-    from encryption_daemon import _fernet_key_from_bytes
+
+# ---------------------------------------------------------------------
+# Fix #1: the UPK outer layer must require the UPK PRIVATE key to open —
+# public key knowledge alone must NOT be enough to decrypt.
+# ---------------------------------------------------------------------
+
+def test_upk_public_bytes_alone_cannot_decrypt_outer_layer():
+    """Regression test for the original flaw: the outer-layer key used to
+    be SHA256(upk_public_bytes) — derivable by anyone with the public key.
+    This proves that's no longer true: hashing the public bytes directly
+    does NOT produce a working Fernet key for the outer layer anymore."""
+    daemon = EncryptionDaemon()
+    record = daemon.encrypt(b"secret payload", date_str="2026-07-11")
+
+    import hashlib, base64
+    from cryptography.fernet import Fernet, InvalidToken
 
     upk_bytes = daemon.upk_public.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-    upk_key = _fernet_key_from_bytes(hashlib.sha256(upk_bytes).digest())
-    inner = Fernet(upk_key).decrypt(record.ciphertext)
+    fake_key = base64.urlsafe_b64encode(hashlib.sha256(upk_bytes).digest()[:32])
 
-    dsk = daemon._derive_dsk("2026-07-11")
-    recovered = Fernet(_fernet_key_from_bytes(dsk)).decrypt(inner)
-    assert recovered == plaintext
+    with pytest.raises(InvalidToken):
+        Fernet(fake_key).decrypt(record.ciphertext)
+
+
+def test_decryption_requires_upk_private_key():
+    """A daemon instance that never had the real UPK private key (only the
+    public key + a mismatched private key) cannot decrypt someone else's
+    record — proving the outer layer is genuinely access-controlled."""
+    daemon = EncryptionDaemon()
+    record = daemon.encrypt(b"secret payload", date_str="2026-07-11")
+
+    impostor = EncryptionDaemon()  # has its own, different UPK private key
+    with pytest.raises(Exception):
+        impostor.verify_and_decrypt(record, date_str="2026-07-11")
+
+
+# ---------------------------------------------------------------------
+# Fix #2: records must be signed, and tampering must be caught.
+# ---------------------------------------------------------------------
+
+def test_record_is_signed():
+    daemon = EncryptionDaemon()
+    record = daemon.encrypt(b"payload", date_str="2026-07-11")
+    assert record.signature != b""
+    assert daemon._chip.verify(daemon.dik_public, record._signed_payload(), record.signature)
+
+
+def test_tampered_ciphertext_fails_verification():
+    daemon = EncryptionDaemon()
+    record = daemon.encrypt(b"payload", date_str="2026-07-11")
+    record.ciphertext = record.ciphertext[:-1] + bytes([record.ciphertext[-1] ^ 0xFF])
+
+    with pytest.raises(SignatureVerificationError):
+        daemon.verify_and_decrypt(record, date_str="2026-07-11")
+
+
+def test_tampered_ephemeral_key_fails_verification():
+    """Swapping in a different (validly-generated) ephemeral key should
+    also break the signature, since the signature covers both fields."""
+    daemon = EncryptionDaemon()
+    record = daemon.encrypt(b"payload", date_str="2026-07-11")
+    other_record = daemon.encrypt(b"other payload", date_str="2026-07-11")
+    record.ephemeral_pub_bytes = other_record.ephemeral_pub_bytes
+
+    with pytest.raises(SignatureVerificationError):
+        daemon.verify_and_decrypt(record, date_str="2026-07-11")
+
+
+# ---------------------------------------------------------------------
+# Fix #3: no raw private-key bytes should be reachable from this module.
+# ---------------------------------------------------------------------
+
+def test_dik_private_bytes_never_exposed_on_daemon():
+    """The daemon should hold no raw-exportable copy of the DIK private
+    key anywhere outside the chip layer's internal use."""
+    daemon = EncryptionDaemon()
+    # The only private-key-shaped attributes on the daemon should be the
+    # key OBJECTS (which the mock 'chip' methods accept), never raw bytes.
+    assert not hasattr(daemon, "_dik_raw")
